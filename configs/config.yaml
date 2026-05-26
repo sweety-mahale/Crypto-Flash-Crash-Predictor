@@ -1,0 +1,43 @@
+# Data Collection Configuration
+data:
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+  collection_interval: 1  # seconds
+  raw_data_path: 'data/raw/'
+  processed_data_path: 'data/processed/'
+
+# Feature Engineering
+features:
+  time_windows:
+    - 60      # 1 minute
+    - 300     # 5 minutes
+    - 900     # 15 minutes
+    - 3600    # 1 hour
+  
+  crash_definition:
+    threshold: -0.03  # -3% drop
+    window: 300       # in 5 minutes (300 seconds)
+
+# Model Configuration
+model:
+  name: 'AdaptiveRandomForest'
+  params:
+    n_models: 10
+    max_features: 'sqrt'
+    lambda_value: 6
+  
+  drift_detector:
+    name: 'ADWIN'
+    delta: 0.002
+
+# API Configuration
+api:
+  host: '0.0.0.0'
+  port: 8000
+  reload: true
+
+# Monitoring
+monitoring:
+  prometheus_port: 9090
+  log_level: 'INFO'
