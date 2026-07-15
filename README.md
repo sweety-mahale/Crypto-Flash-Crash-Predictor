@@ -1,10 +1,10 @@
-# ⚡ Cryptocurrency Flash Crash Predictor (Online ML)
+# Cryptocurrency Flash Crash Predictor (Online ML)
 
 A production-ready Online Machine Learning system that predicts sudden cryptocurrency flash crashes (>3% price drops in under 5 minutes) using streaming WebSocket market feeds and incremental learning algorithms.
 
 ---
 
-## 🏗️ Architecture Flow
+## Architecture Flow
 
 ```mermaid
 graph TD
@@ -19,7 +19,7 @@ graph TD
 
 ---
 
-## 🛠️ Step-by-Step Execution Verification
+## Step-by-Step Execution Verification
 
 To verify and run this project locally, complete the following commands in your workspace directory:
 

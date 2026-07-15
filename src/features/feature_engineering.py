@@ -1,249 +1,245 @@
 """
-Feature Engineering for Crypto Crash Prediction
-Creates time-series, statistical, and technical features
+Feature Engineering - Data-driven based on EDA findings:
+1. Price windows: 3, 6, 12, 24 candles (skip 1-candle, weak)
+2. Volatility: STRONG signal (1.77x), multiple windows
+3. Hour features: STRONG signal (7.8x difference)
+4. Volume: ONE feature only (weak signal, 1.13x)
+5. Technical indicators: RSI, MACD, Bollinger
+Total: ~25 focused features
 """
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
 import logging
-import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class FeatureEngineer:
-    """Creates features for crash prediction"""
-    
+
     def __init__(self):
         self.feature_names = []
-    
+        # Each candle = 5 minutes
+        # EDA: best windows are longer (12-24 candles)
+        self.price_windows  = [3, 6, 12, 24]   # 15, 30, 60, 120 min
+        self.vol_windows    = [3, 6, 12]        # 15, 30, 60 min
+        self.volume_window  = 12                # 1 volume feature only
+
+    # ─────────────────────────────────────────────
+    # MASTER METHOD
+    # ─────────────────────────────────────────────
     def create_all_features(self, df):
-        """
-        Create all features
-        
-        Args:
-            df: DataFrame with columns: timestamp, open, high, low, close, volume
-        
-        Returns:
-            DataFrame with all features
-        """
         logger.info("Starting feature engineering...")
-        
         df = df.copy()
-        
-        # 1. Price-based features
-        df = self._create_price_features(df)
-        
-        # 2. Volume-based features
-        df = self._create_volume_features(df)
-        
-        # 3. Volatility features
-        df = self._create_volatility_features(df)
-        
-        # 4. Technical indicators
-        df = self._create_technical_indicators(df)
-        
-        # 5. Time-based features
-        df = self._create_time_features(df)
-        
-        # 6. Lag features
-        df = self._create_lag_features(df)
-        
-        # Remove rows with NaN (from rolling windows)
-        initial_rows = len(df)
+
+        df = self._price_features(df)       # ~10 features
+        df = self._volatility_features(df)  # ~5 features  ← STRONG
+        df = self._volume_features(df)      # ~2 features  ← WEAK, keep minimal
+        df = self._technical_indicators(df) # ~5 features
+        df = self._time_features(df)        # ~6 features  ← STRONG
+        df = self._lag_features(df)         # ~4 features
+
+        before = len(df)
         df = df.dropna()
-        logger.info(f"Removed {initial_rows - len(df)} rows with NaN values")
-        
-        # Capture feature names (excluding metadata & label)
-        exclude_cols = ['timestamp', 'crash', 'open', 'high', 'low', 'close', 'volume', 'future_return']
-        self.feature_names = [col for col in df.columns if col not in exclude_cols]
-        logger.info(f"Feature engineering complete. Total features: {len(self.feature_names)}")
-        
+        logger.info(f"Dropped {before - len(df)} NaN rows (rolling warmup)")
+        logger.info(f"Final: {len(df)} rows, {len(self.feature_names)} features")
         return df
-    
-    def _create_price_features(self, df):
-        """Create price-based features"""
-        logger.info("Creating price features...")
-        
-        # Price changes (returns)
-        for window in [1, 5, 10, 15, 30, 60]:
-            col_name = f'price_change_{window}min'
-            df[col_name] = df['close'].pct_change(periods=window)
-        
-        # Price momentum (difference between short and long term changes)
-        df['price_momentum_5_15'] = df['price_change_5min'] - df['price_change_15min']
-        df['price_momentum_5_30'] = df['price_change_5min'] - df['price_change_30min']
-        
-        # Price acceleration (change in returns)
-        df['price_acceleration'] = df['price_change_5min'] - df['price_change_5min'].shift(5)
-        
-        # High-Low spread
+
+    # ─────────────────────────────────────────────
+    # 1. PRICE FEATURES
+    # EDA: 24-candle window best (corr=0.059)
+    # Skip 1-candle (corr=0.007, noise)
+    # ─────────────────────────────────────────────
+    def _price_features(self, df):
+        # Price changes - only windows EDA confirmed useful
+        for w in self.price_windows:
+            name = f'price_change_{w}c'
+            df[name] = df['close'].pct_change(w)
+            self.feature_names.append(name)
+
+        # Momentum: fast vs slow window
+        # If short-term drops faster than long-term → crash signal
+        df['price_momentum'] = df['price_change_3c'] - df['price_change_12c']
+        df['price_acceleration'] = df['price_change_3c'] - df['price_change_3c'].shift(3)
+        self.feature_names += ['price_momentum', 'price_acceleration']
+
+        # Candle body size (high-low range / close)
+        # Larger candle = more volatility = potential crash
         df['hl_spread'] = (df['high'] - df['low']) / df['close']
-        
-        # Distance from recent highs/lows
-        df['dist_from_high_60'] = (df['close'] - df['high'].rolling(60).max()) / df['close']
-        df['dist_from_low_60'] = (df['close'] - df['low'].rolling(60).min()) / df['close']
-        
+        self.feature_names.append('hl_spread')
+
+        # Distance from recent high (how far has price fallen?)
+        df['dist_from_high'] = (df['close'] - df['high'].rolling(12).max()) / df['close']
+        self.feature_names.append('dist_from_high')
+
+        logger.info(f"Price features: {len([f for f in self.feature_names if 'price' in f or 'hl_' in f or 'dist_' in f or 'momentum' in f or 'accel' in f])}")
         return df
-    
-    def _create_volume_features(self, df):
-        """Create volume-based features"""
-        logger.info("Creating volume features...")
-        
-        # Volume moving averages
-        for window in [10, 30, 60]:
-            df[f'volume_ma_{window}'] = df['volume'].rolling(window=window).mean()
-        
-        # Volume spikes (current vs average)
-        for window in [10, 30, 60]:
-            col_name = f'volume_spike_{window}'
-            df[col_name] = df['volume'] / df[f'volume_ma_{window}']
-        
-        # Volume trend
-        df['volume_trend'] = df['volume'].rolling(window=10).mean() / df['volume'].rolling(window=30).mean()
-        
-        # Volume change
-        df['volume_change'] = df['volume'].pct_change(periods=5)
-        
+
+    # ─────────────────────────────────────────────
+    # 2. VOLATILITY FEATURES  ← STRONGEST SIGNAL
+    # EDA: 1.77x higher before crash
+    # This is our most important feature group
+    # ─────────────────────────────────────────────
+    def _volatility_features(self, df):
+        returns = df['close'].pct_change()
+
+        for w in self.vol_windows:
+            name = f'volatility_{w}c'
+            df[name] = returns.rolling(w).std()
+            self.feature_names.append(name)
+
+        # Volatility ratio: short/long
+        # If recent volatility spikes vs historical → crash risk
+        df['volatility_ratio'] = df['volatility_3c'] / (df['volatility_12c'] + 1e-8)
+        self.feature_names.append('volatility_ratio')
+
+        # Volatility change (is it accelerating?)
+        df['volatility_change'] = df['volatility_3c'] - df['volatility_3c'].shift(3)
+        self.feature_names.append('volatility_change')
+
+        logger.info(f"Volatility features created: {len(self.vol_windows) + 2}")
         return df
-    
-    def _create_volatility_features(self, df):
-        """Create volatility features"""
-        logger.info("Creating volatility features...")
-        
-        # Rolling standard deviation of returns
-        for window in [5, 10, 15, 30, 60]:
-            col_name = f'volatility_{window}min'
-            df[col_name] = df['close'].pct_change().rolling(window=window).std()
-        
-        # Volatility ratios
-        df['volatility_ratio_5_15'] = df['volatility_5min'] / df['volatility_15min']
-        df['volatility_ratio_5_30'] = df['volatility_5min'] / df['volatility_30min']
-        
-        # Volatility change
-        df['volatility_change'] = df['volatility_15min'] - df['volatility_15min'].shift(15)
-        
+
+    # ─────────────────────────────────────────────
+    # 3. VOLUME FEATURES  ← WEAK SIGNAL
+    # EDA: only 1.13x higher during crashes
+    # Keep minimal - just 1 normalized feature
+    # ─────────────────────────────────────────────
+    def _volume_features(self, df):
+        # Single volume spike feature
+        vol_ma = df['volume'].rolling(self.volume_window).mean()
+        df['volume_spike'] = df['volume'] / (vol_ma + 1e-8)
+        self.feature_names.append('volume_spike')
+
+        # Log volume (reduces skewness)
+        df['volume_log'] = np.log1p(df['volume'])
+        self.feature_names.append('volume_log')
+
+        logger.info("Volume features created: 2 (minimal - EDA showed weak signal)")
         return df
-    
-    def _create_technical_indicators(self, df):
-        """Create technical indicators (EMA, RSI, etc.)"""
-        logger.info("Creating technical indicators...")
-        
-        # Exponential Moving Averages
-        for span in [10, 20, 50]:
-            col_name = f'ema_{span}'
-            df[col_name] = df['close'].ewm(span=span, adjust=False).mean()
-            # EMA crossover signal
-            df[f'price_vs_ema_{span}'] = (df['close'] - df[col_name]) / df['close']
-        
-        # RSI (Relative Strength Index)
-        df['rsi_14'] = self._calculate_rsi(df['close'], period=14)
-        
-        # MACD
-        df['macd'], df['macd_signal'] = self._calculate_macd(df['close'])
-        df['macd_histogram'] = df['macd'] - df['macd_signal']
-        
-        # Bollinger Bands
-        df['bb_upper'], df['bb_middle'], df['bb_lower'] = self._calculate_bollinger_bands(df['close'])
-        df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
-        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
-        
+
+    # ─────────────────────────────────────────────
+    # 4. TECHNICAL INDICATORS
+    # Standard ML features for price prediction
+    # ─────────────────────────────────────────────
+    def _technical_indicators(self, df):
+        # RSI (overbought > 70, oversold < 30)
+        df['rsi_14'] = self._rsi(df['close'], 14)
+        self.feature_names.append('rsi_14')
+
+        # MACD histogram (trend reversal signal)
+        ema12 = df['close'].ewm(span=12).mean()
+        ema26 = df['close'].ewm(span=26).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9).mean()
+        df['macd_hist'] = macd - signal
+        self.feature_names.append('macd_hist')
+
+        # Bollinger Band position (0=lower band, 1=upper band)
+        bb_mid = df['close'].rolling(20).mean()
+        bb_std = df['close'].rolling(20).std()
+        bb_upper = bb_mid + 2 * bb_std
+        bb_lower = bb_mid - 2 * bb_std
+        df['bb_position'] = (df['close'] - bb_lower) / (bb_upper - bb_lower + 1e-8)
+        df['bb_width'] = (bb_upper - bb_lower) / (bb_mid + 1e-8)
+        self.feature_names += ['bb_position', 'bb_width']
+
+        logger.info("Technical indicators created: 5 (RSI, MACD, BB x2)")
         return df
-    
-    def _create_time_features(self, df):
-        """Create time-based features"""
-        logger.info("Creating time features...")
-        
-        # Extract time components
-        df['hour'] = df['timestamp'].dt.hour
-        df['day_of_week'] = df['timestamp'].dt.dayofweek
-        df['day_of_month'] = df['timestamp'].dt.day
-        df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-        
-        # Cyclical encoding (important for hours)
-        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-        df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
-        df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
-        
+
+    # ─────────────────────────────────────────────
+    # 5. TIME FEATURES  ← STRONG SIGNAL
+    # EDA: 7.8x crash rate difference by hour!
+    # 14:00 UTC (US open) = highest risk
+    # 7:00 UTC (Asian) = lowest risk
+    # ─────────────────────────────────────────────
+    def _time_features(self, df):
+        hour = df['timestamp'].dt.hour
+        dow  = df['timestamp'].dt.dayofweek
+
+        # Cyclical encoding (hour 23 and 0 are close, not far)
+        df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+        df['dow_sin']  = np.sin(2 * np.pi * dow / 7)
+        df['dow_cos']  = np.cos(2 * np.pi * dow / 7)
+        self.feature_names += ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos']
+
+        # EDA-derived binary features
+        # 13-16 UTC = US market hours = 4-5% crash rate
+        df['is_us_market'] = hour.between(13, 16).astype(int)
+        # 5-9 UTC = Asian hours = 0.7-1% crash rate
+        df['is_asian_hours'] = hour.between(5, 9).astype(int)
+        self.feature_names += ['is_us_market', 'is_asian_hours']
+
+        logger.info("Time features created: 6 (hour sin/cos, dow sin/cos, US/Asian binary)")
         return df
-    
-    def _create_lag_features(self, df):
-        """Create lagged features"""
-        logger.info("Creating lag features...")
-        
-        # Lag important features
-        lag_features = ['price_change_5min', 'volume_spike_30', 'volatility_15min']
-        
-        for feature in lag_features:
-            if feature in df.columns:
-                for lag in [1, 5, 10]:
-                    col_name = f'{feature}_lag_{lag}'
-                    df[col_name] = df[feature].shift(lag)
-        
+
+    # ─────────────────────────────────────────────
+    # 6. LAG FEATURES
+    # Recent history of key signals
+    # Focus on volatility (strong) not volume (weak)
+    # ─────────────────────────────────────────────
+    def _lag_features(self, df):
+        # Lag volatility (was it already high?)
+        for lag in [1, 3]:
+            name = f'volatility_3c_lag{lag}'
+            df[name] = df['volatility_3c'].shift(lag)
+            self.feature_names.append(name)
+
+        # Lag price change (recent momentum direction)
+        for lag in [1, 3]:
+            name = f'price_change_6c_lag{lag}'
+            df[name] = df['price_change_6c'].shift(lag)
+            self.feature_names.append(name)
+
+        logger.info("Lag features created: 4")
         return df
-    
-    # Helper functions for technical indicators
-    def _calculate_rsi(self, prices, period=14):
-        """Calculate RSI"""
+
+    def _rsi(self, prices, period=14):
         delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    def _calculate_macd(self, prices, fast=12, slow=26, signal=9):
-        """Calculate MACD"""
-        ema_fast = prices.ewm(span=fast, adjust=False).mean()
-        ema_slow = prices.ewm(span=slow, adjust=False).mean()
-        macd = ema_fast - ema_slow
-        macd_signal = macd.ewm(span=signal, adjust=False).mean()
-        return macd, macd_signal
-    
-    def _calculate_bollinger_bands(self, prices, window=20, num_std=2):
-        """Calculate Bollinger Bands"""
-        middle = prices.rolling(window=window).mean()
-        std = prices.rolling(window=window).std()
-        upper = middle + (std * num_std)
-        lower = middle - (std * num_std)
-        return upper, middle, lower
-    
+        gain = delta.clip(lower=0).rolling(period).mean()
+        loss = (-delta.clip(upper=0)).rolling(period).mean()
+        rs = gain / (loss + 1e-8)
+        return 100 - (100 / (1 + rs))
+
     def get_feature_names(self):
-        """Get list of all feature names"""
         return self.feature_names
 
 
-# Main execution
+# ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     import os
-    # Load processed data
-    input_path = 'data/processed/btc_labeled.csv'
-    if not os.path.exists(input_path):
-        # Fallback to historical if processed labeled not generated
-        input_path = 'data/raw/BTCUSDT_historical_7days_1m.csv'
-        
-    if os.path.exists(input_path):
-        df = pd.read_csv(input_path)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Create features
-        feature_engineer = FeatureEngineer()
-        df_features = feature_engineer.create_all_features(df)
-        
-        # Save
-        os.makedirs('data/processed', exist_ok=True)
-        output_path = 'data/processed/btc_features.csv'
-        df_features.to_csv(output_path, index=False)
-        
-        print("\n" + "=" * 70)
-        print("FEATURE ENGINEERING SUMMARY")
-        print("=" * 70)
-        print(f"Total samples: {len(df_features):,}")
-        print(f"Total features: {len(feature_engineer.get_feature_names())}")
-        print("=" * 70)
-        print(f"\n✅ Features saved to: {output_path}")
-    else:
-        print(f"Input path {input_path} not found. Run download_historical.py first.")
+    os.makedirs('data/features', exist_ok=True)
+
+    df = pd.read_csv('data/processed/btc_labeled.csv')
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    # Apply fixes from EDA
+    df = df.drop(columns=['num_trades','buy_volume',
+                          'sell_volume','buy_sell_ratio'], errors='ignore')
+    df['volume'] = df['volume_btc'].replace(0, np.nan).ffill().bfill()
+    df = df.drop(columns=['volume_btc'], errors='ignore')
+
+    # Relabel with EDA-informed threshold
+    future = df['close'].pct_change(3).shift(-3)
+    df['crash'] = (future <= -0.005).astype(int)
+    df['future_return'] = future.fillna(0)
+
+    # Create features
+    fe = FeatureEngineer()
+    df_features = fe.create_all_features(df)
+
+    # Save
+    df_features.to_csv('data/features/btc_features.csv', index=False)
+
+    print("\n" + "="*60)
+    print("FEATURE ENGINEERING COMPLETE")
+    print("="*60)
+    print(f"Rows:     {len(df_features):,}")
+    print(f"Features: {len(fe.feature_names)}")
+    print(f"Crashes:  {df_features['crash'].sum()} ({df_features['crash'].mean()*100:.2f}%)")
+    print(f"\nFeature list:")
+    for i, f in enumerate(fe.feature_names, 1):
+        print(f"  {i:2d}. {f}")
+    print(f"\n✅ Saved: data/features/btc_features.csv")

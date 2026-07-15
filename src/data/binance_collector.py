@@ -5,10 +5,11 @@ Collects real-time BTC price, volume, and order book data
 
 import json
 import time
+import asyncio
 import pandas as pd
 from datetime import datetime
 from binance.client import Client
-from binance.websockets import BinanceSocketManager
+from binance import BinanceSocketManager
 import logging
 import os
 
@@ -72,46 +73,83 @@ class BinanceDataCollector:
                 self.save_buffer()
     
     def save_buffer(self):
-        """Save buffered data to CSV"""
+        """Save buffered data to CSV in a background thread to avoid blocking the queue"""
         if not self.data_buffer:
             return
-        
-        df = pd.DataFrame(self.data_buffer)
-        
-        # Create filename with timestamp
-        filename = os.path.join(self.output_path, f"{self.symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        
-        # Append to existing file or create new
-        try:
-            existing_df = pd.read_csv(filename)
-            df = pd.concat([existing_df, df], ignore_index=True)
-        except FileNotFoundError:
-            pass
-        
-        df.to_csv(filename, index=False)
-        logger.info(f"Saved {len(self.data_buffer)} records to {filename}")
-        
-        # Clear buffer
+            
+        data_to_save = list(self.data_buffer)
         self.data_buffer = []
+        
+        def save_task(data):
+            df = pd.DataFrame(data)
+            filename = os.path.join(self.output_path, f"{self.symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+            df.to_csv(filename, index=False)
+            logger.info(f"Background thread saved {len(data)} records to {filename}")
+            
+        import threading
+        threading.Thread(target=save_task, args=(data_to_save,), daemon=True).start()
     
-    def start(self):
-        """Start collecting data"""
+    async def start_async(self):
+        """Start collecting data asynchronously"""
         logger.info(f"Starting data collection for {self.symbol}...")
         
-        # Start trade socket
-        conn_key = self.bm.start_trade_socket(self.symbol, self.process_message)
-        self.bm.start()
-        
+        while True:
+            try:
+                ts = self.bm.aggtrade_socket(self.symbol)
+                async with ts as t_socket:
+                    logger.info("WebSocket connected successfully.")
+                    while True:
+                        try:
+                            # Wait for a message with a 15-second timeout to handle silent hangs
+                            res = await asyncio.wait_for(t_socket.recv(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            logger.warning("No message received for 15 seconds. Triggering reconnection...")
+                            break
+                        
+                        # If returned response is a dict, parse it
+                        if isinstance(res, dict):
+                            # Verify we have actual trade data fields before mapping
+                            if res.get('T') is not None and res.get('p') is not None:
+                                mapped_res = {
+                                    'e': 'trade',
+                                    'T': res.get('T'),
+                                    's': res.get('s'),
+                                    'p': res.get('p'),
+                                    'q': res.get('q'),
+                                    'm': res.get('m')
+                                }
+                                self.process_message(mapped_res)
+                        elif isinstance(res, str):
+                            try:
+                                parsed = json.loads(res)
+                                if parsed.get('T') is not None and parsed.get('p') is not None:
+                                    mapped_res = {
+                                        'e': 'trade',
+                                        'T': parsed.get('T'),
+                                        's': parsed.get('s'),
+                                        'p': parsed.get('p'),
+                                        'q': parsed.get('q'),
+                                        'm': parsed.get('m')
+                                    }
+                                    self.process_message(mapped_res)
+                            except Exception:
+                                pass
+            except asyncio.CancelledError:
+                logger.info("Stopping data collection...")
+                self.save_buffer()
+                logger.info("Data collection stopped")
+                break
+            except Exception as e:
+                logger.error(f"Error in connection loop: {e}. Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+
+    def start(self):
+        import asyncio
         try:
-            # Keep running
-            while True:
-                time.sleep(1)
+            asyncio.run(self.start_async())
         except KeyboardInterrupt:
-            logger.info("Stopping data collection...")
-            self.save_buffer()  # Save remaining data
-            self.bm.stop_socket(conn_key)
-            self.bm.close()
-            logger.info("Data collection stopped")
+            logger.info("Stopped by user. Saving data.")
+            self.save_buffer()
 
 
 if __name__ == "__main__":
