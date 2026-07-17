@@ -1,0 +1,47 @@
+{
+  "best_model": "arf_online",
+  "features": [
+    "hl_spread",
+    "bb_width",
+    "volatility_6c",
+    "volatility_12c",
+    "price_change_24c",
+    "dist_from_high",
+    "volatility_3c_lag1",
+    "volatility_3c",
+    "volatility_3c_lag3",
+    "price_change_6c",
+    "rsi_14",
+    "volume_log",
+    "macd_hist",
+    "price_change_3c",
+    "bb_position",
+    "price_momentum",
+    "price_change_12c",
+    "volume_spike",
+    "price_change_6c_lag1",
+    "price_change_6c_lag3",
+    "hour_sin",
+    "volatility_ratio"
+  ],
+  "n_features": 22,
+  "best_threshold": 0.1,
+  "candle_interval": "5min",
+  "crash_definition": "-0.5% drop in 15 min (3 candles)",
+  "performance": {
+    "rf_baseline": {
+      "roc_auc": 0.6553,
+      "avg_precision": 0.0153
+    },
+    "arf_online": {
+      "roc_auc": 0.5705,
+      "avg_precision": 0.0147
+    }
+  },
+  "data": {
+    "train_rows": 13757,
+    "test_rows": 3440,
+    "crash_rate": 0.021340931557829856,
+    "date_range": "2026-05-16 to 2026-07-14"
+  }
+}

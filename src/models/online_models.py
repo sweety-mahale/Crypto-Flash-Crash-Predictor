@@ -3,6 +3,10 @@ Online Learning Models using River
 For continuous learning from streaming data
 """
 
+import scipy.integrate as integrate
+if not hasattr(integrate, 'trapz'):
+    integrate.trapz = integrate.trapezoid
+
 from river import forest, ensemble, linear_model, tree, naive_bayes, drift
 from river import metrics
 import pandas as pd
